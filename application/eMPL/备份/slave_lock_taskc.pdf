@@ -1,0 +1,402 @@
+#include "stm32f0xx.h"
+#include "osal.h"
+#include "slave_lock_task.h"
+#include "doorbell.h"
+#include "lock_motor.h"
+#include "lock_app_uart.h"
+#include "lock_config.h"
+//#include "infrared_detect.h"
+#include "io_event.h"
+#include "app_event.h"
+#include "drv_rtc.h"
+#include "hal_uart.h"
+#include "hardware.h"
+#include "driver_icm20689.h"
+//#include "mpu6050.h"
+
+#define LOCK_MOTOR_RUN_STATE         1
+#define LOCK_MOTOR_STOP_STATE        0
+#define READ_REFERENCE 0
+#define READ_COMPARE   1
+
+extern ADC_HandleTypeDef hadc;
+extern uint16_t aADCxConvertedData[8];
+uint8_t slave_lock_task_id = 0;
+
+static uint8_t lock_state    = LOCK_STATE_OFF;
+static uint8_t motor_runing  = LOCK_MOTOR_STOP_STATE;
+uint16_t motor_drag_value = 0;
+
+
+mpu_t 	mpu_data;
+
+
+#define door_motor_revert() 		\
+		do							\
+		{ 							\
+			if (lock_state) 		\
+				door_lock_open();	\
+			else 					\
+				door_lock_close();	\
+		} while(0)
+
+
+uint8_t get_door_lock_state(void)
+{
+    return lock_state;
+}
+
+uint8_t get_motor_status(void)
+{
+    return motor_runing;
+}
+
+void slave_lock_wdg_active(void)
+{
+    //start wdg feed timer
+    osal_set_event(slave_lock_task_id, SLAVE_FEED_WDG_EVENT);
+}
+
+void wakeup_timeout_handler(void)
+{
+	HAL_Wakeup_Source_Set(HAL_WKP_SRC_RTC_TIMEOUT);
+	osal_set_event(slave_lock_task_id,SLAVE_FEED_WDG_EVENT);
+}
+
+void start_wakeup_timer(uint32_t sleepMs)
+{
+    //app_timer_start(m_wakeup_timer_id, APP_TIMER_TICKS(sleepMs), NULL);
+}
+
+void slave_lock_task_init( uint8_t task_id )
+{
+    slave_lock_task_id = task_id;
+	MX_IWDG_Init();
+    lock_gpio_init();
+    lock_config_init();
+	drv_rtc_init();
+    door_bell_init();
+    door_lock_motor_init();
+	//mpu6050_gpio_init();
+	gyro_gpio_init();
+	MX_I2C1_Init();
+	lock_state = LOCK_STATE_ON;
+	
+    osal_start_timerEx(slave_lock_task_id,SLAVE_FEED_WDG_EVENT,100);
+}
+
+
+static float yaw;
+
+static float x_angle = 0;
+static float pre_x_angle = 0;
+static float fx_gyro = 0;
+
+extern ICM_TypeDef scm_gyro;
+
+float door_angle = 0;
+
+uint16_t slave_lock_process_event( uint8_t task_id, uint16_t events )
+{
+    (void)task_id;	
+    uint32_t auto_close_timeout = 0;
+
+    if ( events & LOCK_OPEN_EVENT )
+    {
+        if ( motor_runing == LOCK_MOTOR_STOP_STATE )
+        {				
+			osal_memset(&mpu_data, 0, sizeof(mpu_data));
+			osal_memset(aADCxConvertedData,0,sizeof(aADCxConvertedData));
+			
+			//udata.buf[0]=1;
+			//printf("uinon %d\n",udata.x_gyro_out);
+            door_lock_open();
+            lock_state   = LOCK_STATE_ON;
+            motor_runing = LOCK_MOTOR_RUN_STATE;
+			motor_drag_value = get_motor_drag_value();			
+						
+			if(get_gyro_type())//if enaable gyro function
+			{
+				osal_set_event(slave_lock_task_id, OPEN_MPU6050_EVENT);
+				mpu_data.read_type = READ_REFERENCE;
+				gyro_power_on();
+			}
+			HAL_Delay(50); //DRAG_FEEDBACK_FIRST_TIMEOUT
+			
+			lock_motor_adc_init();
+            osal_start_timerEx(slave_lock_task_id,MOTOR_STOP_EVENT,MOTOR_MAX_RUNING_TIMEOUT);
+            //osal_start_timerEx(slave_lock_task_id,DRAG_FEEDBACK_EVENT,DRAG_FEEDBACK_FIRST_TIMEOUT);
+        }
+        return events ^ LOCK_OPEN_EVENT;
+    }
+
+    if ( events & LOCK_CLOSE_EVENT )
+    {
+        //关门状态已关闭,不在执行关门操作
+        //if (lock_state == LOCK_STATE_ON && motor_runing == LOCK_MOTOR_STOP_STATE)
+		if ( motor_runing == LOCK_MOTOR_STOP_STATE)
+        {
+            //printf("lock close\n");
+            door_lock_close();
+            lock_state   = LOCK_STATE_OFF;
+            motor_runing = LOCK_MOTOR_RUN_STATE;
+			motor_drag_value = get_motor_drag_value();
+			HAL_Delay(100);
+			lock_motor_adc_init();
+            osal_start_timerEx(slave_lock_task_id,MOTOR_STOP_EVENT,MOTOR_MAX_RUNING_TIMEOUT);
+            //osal_start_timerEx(slave_lock_task_id,DRAG_FEEDBACK_EVENT,DRAG_FEEDBACK_FIRST_TIMEOUT);
+        }
+		osal_set_event(slave_lock_task_id, CLOSE_MPU6050_EVENT);
+        return events ^ LOCK_CLOSE_EVENT;
+    }
+	
+    if ( events & MOTOR_STOP_EVENT )
+    {
+       // printf("moto stop\n");
+		//door_motor_stop();
+		HAL_ADC_Stop_DMA(&hadc);//stop adc convert
+		door_motor_brake();
+        lock_app_send_report_lock_state(lock_state);
+       // osal_stop_timerEx(slave_lock_task_id,DRAG_FEEDBACK_EVENT);
+		osal_stop_timerEx(slave_lock_task_id,MOTOR_STOP_EVENT);
+        osal_start_timerEx(task_id,MOTOR_REVERT_EVENT,MOTOR_REVERT_TIMEOUT);//回锁舌
+        return events ^ MOTOR_STOP_EVENT;
+    }
+
+    if ( events & MOTOR_REVERT_EVENT )
+    {
+        //回电机
+		//printf("moto revert\n");
+        door_motor_revert();
+        HAL_Delay(lock_state == LOCK_STATE_ON ?  250 : 150);
+        door_motor_stop();
+        motor_runing = LOCK_MOTOR_STOP_STATE;
+        auto_close_timeout = get_lock_time();
+        //超时自动关锁
+		if(get_gyro_type()) //if enaable gyro function
+		{
+			if(LOCK_STATE_ON == lock_state)
+			{
+				if(mpu_data.open_mpu_flag)
+				{
+					osal_start_timerEx(slave_lock_task_id, READ_MPU6050_EVENT, ENABLE_SHOCK_DETECT_TIMEOUT+1000);
+					mpu_data.read_type = READ_COMPARE;
+					osal_start_timerEx(slave_lock_task_id,CLOSE_MPU6050_EVENT,MPU_WORK_TIME);		
+				}	
+			}		
+		}else{
+			printf("dg ds\n");	
+			if (auto_close_timeout && (LOCK_STATE_ON == lock_state))
+			{
+				osal_start_timerEx(slave_lock_task_id,LOCK_CLOSE_EVENT,auto_close_timeout * 1000);
+			}				
+		}				
+        return events ^ MOTOR_REVERT_EVENT;
+    }
+	
+	if(events & OPEN_MPU6050_EVENT)
+	{
+		osal_stop_timerEx(slave_lock_task_id, READ_MPU6050_EVENT);
+		osal_clear_event(slave_lock_task_id, READ_MPU6050_EVENT);
+		if(gyro_power_on_init() == HAL_OK)
+		{
+			printf("icm ok\n");	
+			//osal_set_event(slave_lock_task_id, READ_MPU6050_EVENT);
+			osal_start_timerEx(slave_lock_task_id, READ_MPU6050_EVENT,800);
+			//osal_set_event(slave_lock_task_id, TEST_EVENT);
+		}
+		else
+		{
+			printf("icm fail\n");
+			osal_set_event(slave_lock_task_id, CLOSE_MPU6050_EVENT);
+		}
+		return events ^ OPEN_MPU6050_EVENT;
+	}
+	
+	if(events & READ_MPU6050_EVENT)		
+	{
+		if(mpu_data.read_type == READ_REFERENCE)
+		{
+			if(read_gyro_offset() == HAL_OK)
+			{	//printf("bia ok\n");
+				printf("bia %d",scm_gyro.offset);
+				mpu_data.open_mpu_flag = 1;
+				//							
+			}else{
+				osal_set_event(slave_lock_task_id, CLOSE_MPU6050_EVENT);	
+			}				
+		}else{
+			if(calculate_angle(&door_angle) == HAL_OK)
+			{
+				printf("%2f\n",door_angle);	
+				
+			}else{
+				printf("re ng\n");
+			}
+			
+			osal_start_timerEx(slave_lock_task_id, READ_MPU6050_EVENT, 500);
+		}
+
+		
+//		if(lock_read_yaw(1,&yaw) == HAL_OK)
+//		{
+//			if(mpu_data.read_type == READ_REFERENCE)
+//			{
+				
+//				mpu_data.referen_value = (int)(yaw*100);
+//				mpu_data.open_mpu_flag = 1;
+//				//printf("ref %d \n",mpu_data.referen_value);
+//			}
+//			else
+//			{
+//				mpu_data.current_value = (int)(yaw*100);
+//				//printf("com %d \n",mpu_data.current_value);
+//				if(compare_mpu6050_data(mpu_data.referen_value,mpu_data.current_value))
+//				{	
+//					osal_stop_timerEx(slave_lock_task_id, LOCK_CLOSE_EVENT);
+//					osal_start_timerEx(slave_lock_task_id, LOCK_CLOSE_EVENT,2000);//
+//					//osal_set_event(slave_lock_task_id, LOCK_CLOSE_EVENT);
+//					osal_set_event(slave_lock_task_id, CLOSE_MPU6050_EVENT);					
+//				}
+//				else
+//				{
+//					osal_start_timerEx(slave_lock_task_id, READ_MPU6050_EVENT, 1000);				
+//				}								
+//			}			
+//		}
+//		else
+//		{
+//			if(mpu_data.read_type == READ_REFERENCE)
+//			{
+//				osal_set_event(slave_lock_task_id, CLOSE_MPU6050_EVENT);				
+//			}else{
+//				osal_start_timerEx(slave_lock_task_id, READ_MPU6050_EVENT, 2000);
+//			}			
+//		}	
+		//osal_start_timerEx(slave_lock_task_id, READ_MAGNETIC_EVENT, ENABLE_SHOCK_DETECT_TIMEOUT);		
+		return events ^ READ_MPU6050_EVENT;
+	}
+
+	if(events & CLOSE_MPU6050_EVENT)
+	{
+		//printf("mpu close\n");
+		gyro_power_off();
+		mpu_data.open_mpu_flag = 0;
+		osal_stop_timerEx(slave_lock_task_id, READ_MPU6050_EVENT);
+		osal_clear_event(slave_lock_task_id, READ_MPU6050_EVENT);
+		osal_stop_timerEx(slave_lock_task_id, CLOSE_MPU6050_EVENT);	
+		return events ^ CLOSE_MPU6050_EVENT;
+	}
+
+    if (events & DOOR_BELL_PALY_EVENT )
+    {
+		if(motor_runing == LOCK_MOTOR_STOP_STATE)
+			door_bell_play();
+        return events ^ DOOR_BELL_PALY_EVENT;
+    }
+
+//    if (events & DRAG_FEEDBACK_EVENT )
+//    {
+//        if ( motor_runing == LOCK_MOTOR_RUN_STATE)
+//        {
+//            uint32_t value = 0;
+
+//            motor_feedback_pin_adc(3,&value);
+//			printf("drag AD %d\n",value);
+//            if ( value < get_motor_drag_value())
+//            {
+//                osal_start_timerEx(slave_lock_task_id,DRAG_FEEDBACK_EVENT,DRAG_FEEDBACK_TIMEOUT);
+//            }
+//            else
+//            {
+//				//printf("adc %d %d\n",value ,get_motor_drag_value());
+//                osal_stop_timerEx(slave_lock_task_id,MOTOR_STOP_EVENT);
+//                osal_clear_event(slave_lock_task_id,MOTOR_STOP_EVENT);
+//                osal_set_event(slave_lock_task_id,MOTOR_STOP_EVENT );
+//            }
+			
+//			osal_stop_timerEx(slave_lock_task_id,MOTOR_STOP_EVENT);
+//			osal_clear_event(slave_lock_task_id,MOTOR_STOP_EVENT);
+//			osal_set_event(slave_lock_task_id,MOTOR_STOP_EVENT );
+//        }
+//        return events ^ DRAG_FEEDBACK_EVENT;
+//    }
+
+    if (events & IOSIGNAL_EVENT )
+    {
+        if (!lock_io_event_handle())
+        {
+            osal_start_timerEx(slave_lock_task_id,IOSIGNAL_EVENT,10);
+        }
+        return ( events ^ IOSIGNAL_EVENT );
+    }
+
+    if (events & SLAVE_FEED_WDG_EVENT)
+    {
+        BSP_WdgFeed();
+		//printf("feed dog\n");
+		//drv_rtc_set_alarm_IT(30);
+		//RTC_read_time();
+        osal_start_timerEx(slave_lock_task_id,SLAVE_FEED_WDG_EVENT,6000);
+        return (events ^ SLAVE_FEED_WDG_EVENT);
+    }
+	
+	if(events & TEST_EVENT )
+	{
+		short *gry;
+		uint8_t fifo_val = 0;
+		uint16_t fifo_count =0;
+		uint16_t i;
+		if(ICM20689_UI_GetGYRO(gry)==HAL_OK)
+		{
+			//printf("x%d y%d z%d \n",gry[0],gry[1],gry[2]);
+			printf("%d ",gry[0]);
+		}
+		
+//		if(read_FIFO_count(&fifo_count) == HAL_OK)
+//		{
+//			//printf("c %d\n",fifo_count);
+//			fifo_count >>= 1;
+//			for(i=0;i<fifo_count;i++)
+//			{
+//				read_FIFO_data(&udata.buf[1]);
+//				read_FIFO_data(&udata.buf[0]);
+//				//udata.x_gyro_out += 60;
+//				fx_gyro = (float)udata.x_gyro_out/Gyro_Sensitivity;
+//				pre_x_angle = getAngle(x_angle,fx_gyro,0.02);
+//				x_angle = pre_x_angle;
+//				printf("%.2f ",x_angle);
+//			}		
+//		}	
+		
+		osal_start_timerEx(slave_lock_task_id,TEST_EVENT,200);
+		return (events ^ TEST_EVENT);
+	}
+    /*
+    	if ( events & UART_SEND_EVENT )
+    	{
+    		lock_uart_send_frame();
+    		return (events ^ UART_SEND_EVENT);
+    	}*/
+    //只要有事件 就刷新休眠定时器
+//	if (!(events & LOCK_INTO_SLEEP_EVENT) && !(events & INFRARED_DETECT_OUT_EVENT) )
+//	{
+//		osal_start_timerEx(task_id,LOCK_INTO_SLEEP_EVENT,LOCK_INTO_SLEEP_TIMEOUT);
+//	}
+
+//	if ( events & LOCK_WAKEUP_EVENT )
+//	{
+//		return events ^ LOCK_WAKEUP_EVENT;
+//	}
+//	if ( events & LOCK_INTO_SLEEP_EVENT )
+//	{
+//		return events ^ LOCK_INTO_SLEEP_EVENT;
+//	}
+    return 0;
+}
+
+
+uint8_t get_slave_lock_task_event_active(void)
+{
+    return (osal_get_timer_active(slave_lock_task_id) != 0) ? TRUE : FALSE;
+}

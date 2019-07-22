@@ -1,0 +1,75 @@
+#ifndef ICM20689_H
+#define ICM20689_H
+//#include "sys.h"
+#include "stm32f0xx.h"
+
+#define GYRO_SIZE 20
+
+typedef union {
+	int16_t gyro_out;
+	uint8_t buf[2];
+}W2B_TypeDef;
+
+typedef struct _ICM_TypeDef{
+	float    pre_angle;
+	float 	 cur_angle ;
+	int16_t  offset;
+	uint16_t fifo_cn;
+	int16_t  gyro_out[GYRO_SIZE];		
+}ICM_TypeDef;
+
+#define MPU_PWR_Pin			GPIO_PIN_0
+#define MPU_PWR_GPIO_Port   GPIOF
+
+#define ICM_I2C_ADDR     0x68
+#define Gyro_Sensitivity 16.4
+/*
+sensitivity
+FS_SEL = 0; 131   250    LSB/(degree/s)
+FS_SEL = 1; 65.5  500
+FS_SEL = 2; 32.8  1000
+FS_SEL = 3; 16.4  2000
+*/
+typedef struct {
+  int referen_value;
+  int current_value;
+  uint8_t read_type;
+  uint8_t open_mpu_flag;
+}mpu_t;
+
+uint8_t Init_ICM20689(void);
+unsigned char MPU_Write_Len(unsigned char addr,unsigned char reg,unsigned char len,unsigned char *buf);
+unsigned char MPU_Read_Len(unsigned char addr,unsigned char reg,unsigned char len,unsigned char *buf);
+
+void icm20689_dmp_setup(void);
+char get_dmp_data(float* yaw,float* pitch, float* roll);
+unsigned char MPU_Get_Gyroscope(short *gx,short *gy,short *gz);
+unsigned char MPU_Get_Accelerometer(short *ax,short *ay,short *az);
+
+void MX_I2C1_Init(void);
+
+uint8_t Init_ICM20689(void);
+void gyro_gpio_init(void);
+void gyro_power_on(void);
+void gyro_power_off(void);
+uint8_t gyro_power_on_init(void);
+uint8_t lock_read_yaw(uint8_t time,float *value);
+uint8_t compare_mpu6050_data(int16_t referen,int16_t input);
+uint8_t ICM20689_UI_GetGYRO(short *gry);
+
+uint8_t gyro_offset_adjustment(short vaule);
+
+uint8_t read_FIFO_count(uint16_t *vaule);
+uint8_t read_FIFO_data(uint8_t *vaule);
+
+void Kalman_init(void);
+
+float getAngle(float newAngle, float newRate, float dt) ;
+
+int16_t calculate_offset(int16_t *buf,uint8_t len);
+
+uint8_t read_gyro_offset(void);
+uint8_t calculate_angle(float *angle);
+#endif
+
+

@@ -1,0 +1,712 @@
+
+#include "stm32f0xx_hal.h"
+#include "hal_board.h"
+#include "lock_config.h"
+#include "driver_icm20689.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include "stdlib.h"
+//#include "spi.h"
+
+W2B_TypeDef ucm_data;
+ICM_TypeDef scm_gyro;
+//-----------------------------------
+//#define ICM_20689_ENABLE   PAout(4)=0
+//#define ICM_20689_DISABLE  PAout(4)=1
+//----------------------------------
+
+/*				REGISTER MAP			*/
+#define SELF_TEST_X_GYRO  0x00
+#define SELF_TEST_Y_GYRO  0x01 
+#define SELF_TEST_Z_GYRO  0x02
+
+#define SELF_TEST_X_ACCEL 0x0D	 
+#define SELF_TEST_Y_ACCEL 0x0E	 
+#define SELF_TEST_Z_ACCEL 0x0F	
+
+#define XG_OFFS_USRH      0x13	
+#define XG_OFFS_USRL      0x14
+
+#define YG_OFFS_USRH      0x15
+#define YG_OFFS_USRL      0x16
+#define ZG_OFFS_USRH      0x17
+#define ZG_OFFS_USRL      0x18
+
+#define SMPLRT_DIV        0x19
+
+#define CONFIG            0x1A
+#define GYRO_CONFIG       0x1B
+#define ACCEL_CONFIG      0x1C
+#define ACCEL_CONFIG_2    0x1D
+
+#define LOW_POWER_MODE	  0x1E
+
+#define MPU_FIFO_EN_REG		0X23	//FIFO使能寄存器
+
+#define MPU_INTBP_CFG_REG	0X37	//中断/旁路设置寄存器
+#define MPU_INT_EN_REG		0X38	//中断使能寄存器
+#define MPU_INT_STA_REG		0X3A	//中断状态寄存器
+
+#define ACCEL_XOUT_H      0x3B
+#define ACCEL_XOUT_L      0x3C
+#define ACCEL_YOUT_H      0x3D
+#define ACCEL_YOUT_L      0x3E
+#define ACCEL_ZOUT_H      0x3F
+#define ACCEL_ZOUT_L      0x40
+#define TEMP_OUT_H        0x41
+#define TEMP_OUT_L        0x42
+#define GYRO_XOUT_H       0x43
+#define GYRO_XOUT_L       0x44
+#define GYRO_YOUT_H       0x45
+#define GYRO_YOUT_L       0x46
+#define GYRO_ZOUT_H       0x47
+#define GYRO_ZOUT_L       0x48
+
+#define USER_CTRL         0x6A
+
+#define PWR_MGMT_1        0x6B
+#define PWR_MGMT_2        0x6C
+#define WHO_AM_I          0x75
+
+#define FIFO_COUNTH		0x72
+
+#define FIFO_REG		0x74
+
+I2C_HandleTypeDef hi2c1;
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+void MX_I2C1_Init(void)
+{    
+    /* USER CODE BEGIN I2C1_Init 0 */
+
+    /* USER CODE END I2C1_Init 0 */
+
+    /* USER CODE BEGIN I2C1_Init 1 */
+
+    /* USER CODE END I2C1_Init 1 */
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.Timing = 0x00201D2B;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+    {
+        //Error_Handler();
+    }
+    /** Configure Analogue filter
+    */
+    if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+    {
+       // Error_Handler();
+    }
+    /** Configure Digital filter
+    */
+    if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+    {
+       // Error_Handler();
+    }
+    /* USER CODE BEGIN I2C1_Init 2 */
+
+    /* USER CODE END I2C1_Init 2 */
+}
+
+/**
+* @brief I2C MSP Initialization
+* This function configures the hardware resources used in this example
+* @param hi2c: I2C handle pointer
+* @retval None
+*/
+void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  if(hi2c->Instance==I2C1)
+  {
+  /* USER CODE BEGIN I2C1_MspInit 0 */
+
+  /* USER CODE END I2C1_MspInit 0 */
+  
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /**I2C1 GPIO Configuration    
+    PA9     ------> I2C1_SCL
+    PA10     ------> I2C1_SDA 
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* Peripheral clock enable */
+    __HAL_RCC_I2C1_CLK_ENABLE();
+  /* USER CODE BEGIN I2C1_MspInit 1 */
+
+  /* USER CODE END I2C1_MspInit 1 */
+  }
+}
+
+/**
+* @brief I2C MSP De-Initialization
+* This function freeze the hardware resources used in this example
+* @param hi2c: I2C handle pointer
+* @retval None
+*/
+void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
+{
+  if(hi2c->Instance==I2C1)
+  {
+  /* USER CODE BEGIN I2C1_MspDeInit 0 */
+
+  /* USER CODE END I2C1_MspDeInit 0 */
+    /* Peripheral clock disable */
+    __HAL_RCC_I2C1_CLK_DISABLE();
+  
+    /**I2C1 GPIO Configuration    
+    PA9     ------> I2C1_SCL
+    PA10     ------> I2C1_SDA 
+    */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9|GPIO_PIN_10);
+
+  /* USER CODE BEGIN I2C1_MspDeInit 1 */
+
+  /* USER CODE END I2C1_MspDeInit 1 */
+  }
+
+}
+
+void gyro_gpio_init(void)
+{
+	GPIO_InitTypeDef GPIO_InitStruct;
+	/* GPIO Ports Clock Enable */
+	__HAL_RCC_GPIOA_CLK_ENABLE();
+	__HAL_RCC_GPIOF_CLK_ENABLE();
+	
+	/*Configure GPIO pins : PA9 PA10 */
+	GPIO_InitStruct.Pin  = GPIO_PIN_9|GPIO_PIN_10;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	
+	/*Configure GPIO pins : PF0*/
+	GPIO_InitStruct.Pin  = MPU_PWR_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(MPU_PWR_GPIO_Port, &GPIO_InitStruct);
+	
+	HAL_GPIO_WritePin(MPU_PWR_GPIO_Port, MPU_PWR_Pin,   GPIO_PIN_SET);		
+}
+
+
+void gyro_power_on(void)
+{
+
+    HAL_GPIO_WritePin(MPU_PWR_GPIO_Port, MPU_PWR_Pin, GPIO_PIN_RESET);	;//turn on mos    
+	MX_I2C1_Init();
+//halTimerDelay(20);
+}
+
+uint8_t gyro_power_on_init(void)
+{
+
+	//return Init_ICM20689();
+    uint8_t i = 10;
+    uint8_t res = 0;
+    for(i=0; i<5; i++)
+    {
+		res = Init_ICM20689();
+		//res = icm20689_dmp_setup();
+		printf("icm_init %d\n",res);
+        if(res == HAL_OK)
+		{			
+            return res;
+        }		
+        halTimerDelay(2);
+    }
+    return res;	
+}
+
+void gyro_power_off(void)
+{
+	//HAL_I2C_MspDeInit(&hi2c1);
+	//mpu6050_gpio_init();	
+	HAL_GPIO_WritePin(MPU_PWR_GPIO_Port, MPU_PWR_Pin,   GPIO_PIN_SET);	
+}
+
+
+static uint8_t ICM20689_Write_Reg(uint8_t reg,uint8_t value)
+{
+//	uint8_t status;
+//	ICM_20689_ENABLE;
+//	status = HAL_SPI_Transmit(&hspi1, &reg, 1, 0xFFFF);
+//	status = HAL_SPI_Transmit(&hspi1, &value, 1, 0xFFFF);
+//	ICM_20689_DISABLE;
+//	return(status);
+	
+	//HAL_OK-->0
+	return HAL_I2C_Mem_Write(&hi2c1, ((ICM_I2C_ADDR<<1)|0), reg, 1, &value, 1, 100);			
+}
+
+static uint8_t ICM20689_Read_Reg(uint8_t reg,uint8_t *reg_val)
+{
+	//uint8_t reg_val;
+//	ICM_20689_ENABLE;	
+//	reg = reg|0x80;
+//	HAL_SPI_Transmit(&hspi1, &reg, 1, 0xFFFF);	 	
+// 	HAL_SPI_Receive(&hspi1, &reg_val, 1, 0xFFFF);	
+//	ICM_20689_DISABLE;															
+//	return(reg_val);	
+	return HAL_I2C_Mem_Read(&hi2c1, ((ICM_I2C_ADDR<<1)|1), reg, 1, reg_val, 1, 100);	
+			
+}
+
+uint8_t icm20689_reset()
+{
+	uint8_t res = 0;
+	res |= ICM20689_Write_Reg(PWR_MGMT_1,0X80);	//复位
+	HAL_Delay(100);
+	res |= ICM20689_Write_Reg(PWR_MGMT_1, 0x00);	//解除休眠状态
+	return res;
+}
+
+/*
+sensitivity
+FS_SEL = 0; 131   250    LSB/(degree/s)
+FS_SEL = 1; 65.5  500
+FS_SEL = 2; 32.8  1000
+FS_SEL = 3; 16.4  2000
+*/
+
+//不用DMP初始化版本 0-OK
+uint8_t Init_ICM20689(void)
+{	
+	uint8_t res = 0;
+	uint8_t reg_val = 0;
+//	res |= ICM20689_Read_Reg(WHO_AM_I,&reg_val);
+//	if((res != HAL_OK)||reg_val != 0x98)
+//	{
+//		return 0x80;
+//	}
+//	printf("id %0x\n",reg_val);
+	res |= ICM20689_Write_Reg(PWR_MGMT_1,0X80);	    //复位
+	HAL_Delay(100);
+	res |= ICM20689_Write_Reg(PWR_MGMT_1, 0x00);	//解除休眠状态
+	
+	res |= ICM20689_Write_Reg(GYRO_CONFIG,3<<3);       //P40 设置陀螺仪满量程范围 3<<3;0-250,1-500,2-1000,3-2000
+	res |= ICM20689_Write_Reg(ACCEL_CONFIG,0<<3);   //加速度计工作范围 2G
+	res |= ICM20689_Write_Reg(ACCEL_CONFIG_2, 0x08);//加速计高通滤波频率 典型值 ：0x08  （1.13kHz）	
+	
+	res |= ICM20689_Write_Reg(SMPLRT_DIV,9);       //SAMPLE_RATE = INTERNAL_SAMPLE_RATE / (1 + SMPLRT_DIV) 1K/(1+19) = 50HZ
+	res |= ICM20689_Write_Reg(CONFIG,4);			//低通滤波频率，典型值：0x07(3600Hz)此寄存器内决定Internal_Sample_Rate==8K
+	
+	res |= ICM20689_Write_Reg(MPU_INT_EN_REG,0X00);	//关闭所有中断
+	res |= ICM20689_Write_Reg(MPU_FIFO_EN_REG,0X40);//FIFO XG_EN
+	
+	res |= ICM20689_Write_Reg(USER_CTRL,0x44);      //FIFO EN ;fifo_rst
+	
+	res |= ICM20689_Write_Reg(PWR_MGMT_1,0X01);	    //设置CLKSEL,PLL X轴为参考
+
+	res |= ICM20689_Write_Reg(PWR_MGMT_2,(0x3B));	//3b 加速度与陀螺仪都工作	
+
+	//res |= gyro_offset_adjustment(60);
+	
+	//
+	return res;
+}
+
+//注意单位-----使用dmp模式时加速度量程一定是 +/- 4g
+unsigned char MPU_Get_Accelerometer(short *ax,short *ay,short *az)
+{
+    unsigned char buf[6],res;  
+	res = MPU_Read_Len(0x00,ACCEL_XOUT_H,6,buf);
+	if(res==0)
+	{
+		*ax=((unsigned short int)buf[0]<<8)|buf[1];  
+		*ay=((unsigned short int)buf[2]<<8)|buf[3];  
+		*az=((unsigned short int)buf[4]<<8)|buf[5];
+	} 	
+    return res;
+}
+
+//注意单位-----使用dmp模式时陀螺仪量程一定是 +/- 2000dps
+unsigned char MPU_Get_Gyroscope(short *gx,short *gy,short *gz)
+{
+    unsigned char buf[6],res;  
+	res=MPU_Read_Len(0x00,GYRO_XOUT_H,6,buf);
+	if(res==0)
+	{
+		*gx=((unsigned short int)buf[0]<<8)|buf[1];  
+		*gy=((unsigned short int)buf[2]<<8)|buf[3];  
+		*gz=((unsigned short int)buf[4]<<8)|buf[5];
+	} 	
+    return res;
+}
+
+
+unsigned char MPU_Write_Len(unsigned char addr,unsigned char reg,unsigned char len,unsigned char *buf)
+{
+//	uint8_t status;
+//	ICM_20689_ENABLE;
+//	status = HAL_SPI_Transmit(&hspi1, &reg, 1, 0xFFFF);
+//	status = HAL_SPI_Transmit(&hspi1, buf, len, 0xFFFF);
+//	ICM_20689_DISABLE;
+//	
+//	return status;	
+	
+	return (HAL_I2C_Mem_Write(&hi2c1, ((ICM_I2C_ADDR<<1)|0), reg, 1, buf, len, 100));	
+} 
+
+unsigned char MPU_Read_Len(unsigned char addr,unsigned char reg,unsigned char len,unsigned char *buf)
+{ 
+//	uint8_t status;
+//	ICM_20689_ENABLE;	
+//	reg = reg|0x80;
+//	status=HAL_SPI_Transmit(&hspi1, &reg, 1, 0xFFFF);	 	
+// 	status=HAL_SPI_Receive(&hspi1, buf, len, 0xFFFF);	
+//	ICM_20689_DISABLE;						
+//	return status;		
+	return (HAL_I2C_Mem_Read(&hi2c1, ((ICM_I2C_ADDR<<1)|1), reg, 1, buf, len, 100));	
+}
+
+
+//**********************************************************************************************************************************************************
+static int idd_io_hal_read_reg(void * context, uint8_t reg, uint8_t * rbuffer, uint32_t rlen)
+{
+	(void)context;
+	return MPU_Read_Len(0x00, reg, rlen, rbuffer);
+}
+
+static int idd_io_hal_write_reg(void * context, uint8_t reg, const uint8_t * wbuffer, uint32_t wlen)
+{
+	(void)context;
+	return MPU_Write_Len(0x00, reg, wlen, (uint8_t*)wbuffer);
+
+}
+
+
+uint8_t ICM20689_UI_GetGYRO(short *gry)
+{
+	uint8_t buf[6];
+	uint8_t res = 0;
+//  short gry[3];
+  //inv_serif_read(0x43,buf,6);
+  //i2c_master_read_register(GYRO_XOUT_H,buf,6);
+	res = MPU_Read_Len(0x00,GYRO_XOUT_H,6,buf);
+	gry[0] = (short)(((short)buf[0]) << 8 | buf[1]);
+	gry[1] = (short)(((short)buf[2]) << 8 | buf[3]);
+	gry[2] = (short)(((short)buf[4]) << 8 | buf[5]);
+	return res;
+  //INV_MSG(0,"GRY\t%d\t%f\t%f\t%f ",system_time_counter,(float)gry[0]/16.384f,(float)gry[1]/16.384f,(float)gry[2]/16.384f);
+}
+
+
+uint8_t gyro_offset_adjustment(short vaule)
+{
+	uint8_t buf[2] ;
+	buf[0] = vaule >> 8 ;
+	buf[1] = vaule&0xff ;
+	
+	return (HAL_I2C_Mem_Write(&hi2c1, ((ICM_I2C_ADDR<<1)|0), XG_OFFS_USRH, 1, buf, 2, 100));
+}
+
+
+uint8_t read_FIFO_count(uint16_t *vaule)
+{	
+	uint8_t buf[2] ;
+	uint8_t res;
+	uint16_t count = 0;
+	
+	res = HAL_I2C_Mem_Read(&hi2c1, ((ICM_I2C_ADDR<<1)|1), FIFO_COUNTH, 1, buf, 2, 100);	
+	count = buf[0];
+	count = (count<<8)+buf[1];
+	*vaule = count;
+	return res;
+	//return (MPU_Read_Len(&hi2c1, ((ICM_I2C_ADDR<<1)|0), XG_OFFS_USRH, 1, buf, 2, 100));
+}
+
+uint8_t read_FIFO_data(uint8_t *vaule)
+{	
+	return (HAL_I2C_Mem_Read(&hi2c1, ((ICM_I2C_ADDR<<1)|1), FIFO_REG, 1, vaule, 1, 100));	
+	//return (MPU_Read_Len(&hi2c1, ((ICM_I2C_ADDR<<1)|0), XG_OFFS_USRH, 1, buf, 2, 100));
+}
+
+
+//void dmp_setup(int (*read_reg)(void * context, uint8_t reg, uint8_t * buf, uint32_t len),int (*write_reg)(void * context, uint8_t reg, const uint8_t * buf, uint32_t len));
+//float* icm20689_data_poll(void);
+
+
+//用DMP初始化版本
+void icm20689_dmp_setup()
+{
+	icm20689_reset();								//必须先reset
+//	dmp_setup(idd_io_hal_read_reg,idd_io_hal_write_reg);
+}
+
+int count=0;
+//读取  0表示成功  1表示失败
+char get_dmp_data(float* yaw,float* pitch, float* roll)
+{
+//	float * point = icm20689_data_poll();
+//	
+//	if(point)
+//	{
+//		*yaw = *point;
+//		*pitch = *(point+1);
+//		*roll = *(point+2);
+//		count++;
+//		return 0;
+//	}
+	return 1;
+}
+
+uint8_t lock_read_yaw(uint8_t time,float *value)
+{
+//    uint8_t read_success_cnt = 0;
+//    float temp = 0;
+//    float yaw_val = 0,yaw_sum = 0;
+   // mpu6050_set_iic_io();
+//    for( uint8_t i = 0; i < time+3; i ++ )
+//    {
+//        if(get_dmp_data(&temp,&temp,&yaw_val)==0)
+//        {
+//            read_success_cnt++;
+//            //if(read_success_cnt > 1)
+//            yaw_sum += yaw_val;
+//            if(read_success_cnt >= time)
+//                break;
+//        }
+//        //nrf_delay_ms(20);
+//		halTimerDelay(20);
+//    }
+//    if(read_success_cnt > 0)
+//    {
+//        *value = yaw_sum/(read_success_cnt);
+//        return 1;
+//    }
+//    else
+//    {
+//        return 0;
+//    }
+	return 0;
+}
+
+
+uint8_t compare_mpu6050_data(int16_t referen,int16_t input)
+{
+    uint8_t res = 0;
+    int16_t err;
+    err = abs(referen-input);
+   // NRF_LOG_INFO("mpu err %d",err);
+    if(err <= AUTO_LOCK_ANGLE)
+    {
+        res = 1;
+    }
+    return res;
+}
+
+//****************Kalman
+float Q_angle; // Process noise variance for the accelerometer
+float Q_bias; // Process noise variance for the gyro bias
+float R_measure; // Measurement noise variance - this is actually the variance of the measurement noise
+
+float angle; // The angle calculated by the Kalman filter - part of the 2x1 state vector
+float bias; // The gyro bias calculated by the Kalman filter - part of the 2x1 state vector
+float rate; // Unbiased rate calculated from the rate and the calculated bias - you have to call getAngle to update the rate
+
+float P[2][2]; // Error covariance matrix - This is a 2x2 matrix
+
+
+void Kalman_init(void)
+{
+    /* We will set the variables like so, these can also be tuned by the user */
+    Q_angle = 0.001f;
+    Q_bias = 0.003f;
+    R_measure = 0.03f;
+
+    angle = 0.0f; // Reset the angle
+    bias = 0.0f; // Reset bias
+
+    P[0][0] = 0.0f; // Since we assume that the bias is 0 and we know the starting angle (use setAngle), the error covariance matrix is set like so - see: http://en.wikipedia.org/wiki/Kalman_filter#Example_application.2C_technical
+    P[0][1] = 0.0f;
+    P[1][0] = 0.0f;
+    P[1][1] = 0.0f;
+}	
+
+
+// The angle should be in degrees and the rate should be in degrees per second and the delta time in seconds
+float getAngle(float newAngle, float newRate, float dt) 
+{
+    // KasBot V2  -  Kalman filter module - http://www.x-firm.com/?page_id=145
+    // Modified by Kristian Lauszus
+    // See my blog post for more information: http://blog.tkjelectronics.dk/2012/09/a-practical-approach-to-kalman-filter-and-how-to-implement-it
+
+    // Discrete Kalman filter time update equations - Time Update ("Predict")
+    // Update xhat - Project the state ahead
+    /* Step 1 */
+    rate = newRate - bias;
+    angle += dt * rate;
+
+    // Update estimation error covariance - Project the error covariance ahead
+    /* Step 2 */
+    P[0][0] += dt * (dt*P[1][1] - P[0][1] - P[1][0] + Q_angle);
+    P[0][1] -= dt * P[1][1];
+    P[1][0] -= dt * P[1][1];
+    P[1][1] += Q_bias * dt;
+
+    // Discrete Kalman filter measurement update equations - Measurement Update ("Correct")
+    // Calculate Kalman gain - Compute the Kalman gain
+    /* Step 4 */
+    float S = P[0][0] + R_measure; // Estimate error
+    /* Step 5 */
+    float K[2]; // Kalman gain - This is a 2x1 vector
+    K[0] = P[0][0] / S;
+    K[1] = P[1][0] / S;
+
+    // Calculate angle and bias - Update estimate with measurement zk (newAngle)
+    /* Step 3 */
+    float y = newAngle - angle; // Angle difference
+    /* Step 6 */
+    angle += K[0] * y;
+    bias += K[1] * y;
+
+    // Calculate estimation error covariance - Update the error covariance
+    /* Step 7 */
+    float P00_temp = P[0][0];
+    float P01_temp = P[0][1];
+
+    P[0][0] -= K[0] * P00_temp;
+    P[0][1] -= K[0] * P01_temp;
+    P[1][0] -= K[1] * P00_temp;
+    P[1][1] -= K[1] * P01_temp;
+
+    return angle;
+};
+
+
+int16_t calculate_offset(int16_t *buf,uint8_t len)
+{
+	uint8_t i,j;
+	int16_t temp;
+	int32_t sum = 0;
+	if(len <= 10)
+	{
+		return 10;
+	}
+	
+	for(i=0;i<5;i++) //find the max
+	{
+		for(j=i+1;j<len;j++)
+		{
+			if(buf[i]<buf[j])
+			{
+				temp = buf[i];
+				buf[i] = buf[j];
+				buf[j] = temp;
+			}				
+		}	
+	}
+
+	for(i=5;i<10;i++) //find the min
+	{
+		for(j=i+1;j<len;j++)
+		{
+			if(buf[i]>buf[j])
+			{
+				temp = buf[i];
+				buf[i] = buf[j];
+				buf[j] = temp;
+			}				
+		}	
+	}
+	
+	for(i=10;i<len;i++) //find the max
+	{
+		sum += buf[i];
+	}		
+	sum = sum/(len-10);
+	if(sum > 60)
+	{
+		sum = 60;
+	}
+	return sum;
+}
+
+
+
+uint8_t read_gyro_offset(void)
+{
+	uint16_t fifo_cnt,i;
+	
+	if( read_FIFO_count(&fifo_cnt) == HAL_OK)
+	{
+		printf("ba c %d\n",fifo_cnt);
+		if(fifo_cnt >= (GYRO_SIZE<<1))
+		{
+			for(i=0;i<GYRO_SIZE;i++)
+			{
+				read_FIFO_data(&ucm_data.buf[1]);
+				read_FIFO_data(&ucm_data.buf[0]);
+				scm_gyro.gyro_out[i] = ucm_data.gyro_out;
+			}
+			
+			scm_gyro.offset = calculate_offset(scm_gyro.gyro_out,GYRO_SIZE);
+			
+			ICM20689_Write_Reg(USER_CTRL,0x44);//fifo en, fifo rst  
+			Kalman_init(); //init kalman parameter
+			//osal_memset(&scm_gyro,0,sizeof(scm_gyro));
+			scm_gyro.pre_angle = 0;
+			return HAL_OK;
+		}		
+	}		
+	return HAL_ERROR;
+}
+
+
+uint8_t calculate_angle(float *angle)
+{
+	uint16_t fifo_cnt,i;
+	float fx_gyro = 0;
+	if( read_FIFO_count(&fifo_cnt) == HAL_OK)
+	{
+		printf("c %d\n",fifo_cnt);
+		if(fifo_cnt > 1)
+		{
+			fifo_cnt >>= 1;
+			for(i=0;i<fifo_cnt;i++)
+			{
+				read_FIFO_data(&ucm_data.buf[1]);
+				read_FIFO_data(&ucm_data.buf[0]);
+				fx_gyro = (float)(ucm_data.gyro_out - scm_gyro.offset)/Gyro_Sensitivity;
+				scm_gyro.cur_angle = getAngle(scm_gyro.pre_angle,fx_gyro,0.01);
+				scm_gyro.pre_angle = scm_gyro.cur_angle;
+				*angle = scm_gyro.cur_angle;
+			}
+			return HAL_OK;
+		}
+	}
+	return HAL_ERROR;
+}
+	
+
+//		if(read_FIFO_count(&fifo_count) == HAL_OK)
+//		{
+//			//printf("c %d\n",fifo_count);
+//			fifo_count >>= 1;
+//			for(i=0;i<fifo_count;i++)
+//			{
+//				read_FIFO_data(&udata.buf[1]);
+//				read_FIFO_data(&udata.buf[0]);
+//				//udata.x_gyro_out += 60;
+//				fx_gyro = (float)udata.x_gyro_out/Gyro_Sensitivity;
+//				pre_x_angle = getAngle(x_angle,fx_gyro,0.02);
+//				x_angle = pre_x_angle;
+//				printf("%.2f ",x_angle);
+//			}		
+//		}
+
